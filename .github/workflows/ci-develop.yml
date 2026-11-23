@@ -1,0 +1,228 @@
+name: CI/CD Develop - entradasya-ms-tickets
+
+on:
+  push:
+    branches: [ develop ]
+  pull_request:
+    branches: [ develop ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-secrets:
+    name: Escaneo de Secretos (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio con historial completo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ejecutar Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test-and-build:
+    name: Pruebas, Compilacion y Build Artifact
+    needs: security-secrets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Generar metadata de compilacion
+        id: meta
+        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ejecutar pruebas unitarias y validar sintaxis
+        run: |
+          mkdir -p reports artifact-out
+          pytest -v --junitxml=reports/junit.xml
+          python -m compileall -q app main.py
+
+      - name: Empaquetar bundle del servicio
+        run: |
+          tar -czf "artifact-out/entradasya-ms-tickets-${{ steps.meta.outputs.short_sha }}.tar.gz" app main.py requirements.txt migrations storage
+          cp reports/junit.xml artifact-out/junit.xml
+
+      - name: Subir artifact de compilacion
+        uses: actions/upload-artifact@v4
+        with:
+          name: entradasya-ms-tickets-bundle-${{ steps.meta.outputs.short_sha }}
+          path: artifact-out/
+          retention-days: 14
+          if-no-files-found: error
+  docker-and-trivy:
+    name: Imagen Docker, Registries y Auditoria Trivy
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clonar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Normalizar identificadores en minusculas
+        id: meta
+        run: |
+          OWNER_LOWER=$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          REPO_LOWER=$(printf '%s' "${REPO_NAME}" | tr '[:upper:]' '[:lower:]')
+          SHORT_SHA="${GITHUB_SHA::7}"
+          echo "owner_lower=${OWNER_LOWER}" >> "$GITHUB_OUTPUT"
+          echo "repo_lower=${REPO_LOWER}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Verificar credenciales opcionales de Docker Hub
+        id: dockerhub
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "${DH_USER}" ] && [ -n "${DH_TOKEN}" ]; then
+            USER_LOWER=$(printf '%s' "${DH_USER}" | tr '[:upper:]' '[:lower:]')
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "user_lower=${USER_LOWER}" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "user_lower=" >> "$GITHUB_OUTPUT"
+            echo "::notice::Secrets DOCKERHUB_USERNAME y DOCKERHUB_TOKEN no configurados; se omite Docker Hub y se publica solo en GHCR."
+          fi
+
+      - name: Calcular etiquetas de imagen
+        id: tags
+        run: |
+          OWNER="${{ steps.meta.outputs.owner_lower }}"
+          REPO="${{ steps.meta.outputs.repo_lower }}"
+          SHA="${{ steps.meta.outputs.short_sha }}"
+          DH_ENABLED="${{ steps.dockerhub.outputs.enabled }}"
+          DH_USER="${{ steps.dockerhub.outputs.user_lower }}"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SCAN_REF="${REPO}:pr-${SHA}"
+            {
+              echo "tags<<EOF"
+              echo "${REPO}:pr-${SHA}"
+              echo "EOF"
+              echo "scan_ref=${SCAN_REF}"
+            } >> "$GITHUB_OUTPUT"
+          else
+            SCAN_REF="ghcr.io/${OWNER}/${REPO}:develop-${SHA}"
+            {
+              echo "tags<<EOF"
+              echo "ghcr.io/${OWNER}/${REPO}:develop"
+              echo "ghcr.io/${OWNER}/${REPO}:develop-${SHA}"
+              if [ "${DH_ENABLED}" = "true" ]; then
+                echo "${DH_USER}/${REPO}:develop"
+                echo "${DH_USER}/${REPO}:develop-${SHA}"
+              fi
+              echo "EOF"
+              echo "scan_ref=${SCAN_REF}"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Iniciar sesion en GitHub Container Registry (GHCR)
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Iniciar sesion en Docker Hub (condicional)
+        if: github.event_name != 'pull_request' && steps.dockerhub.outputs.enabled == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Construir y publicar imagen Docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Escanear imagen con Trivy (reporte tabla)
+        uses: aquasecurity/trivy-action@0.28.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ${{ steps.tags.outputs.scan_ref }}
+          format: 'table'
+          output: 'trivy-report.txt'
+          ignore-unfixed: true
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+
+      - name: Escanear imagen con Trivy (reporte JSON)
+        uses: aquasecurity/trivy-action@0.28.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ${{ steps.tags.outputs.scan_ref }}
+          format: 'json'
+          output: 'trivy-report.json'
+          ignore-unfixed: true
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+
+      - name: Subir reporte Trivy como artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.repo_lower }}-trivy-report-${{ steps.meta.outputs.short_sha }}
+          path: trivy-report.*
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publicar resumen en GitHub Step Summary
+        run: |
+          {
+            echo "## Resumen Pipeline CI/CD - ${{ steps.meta.outputs.repo_lower }}"
+            echo ""
+            echo "| Campo | Valor |"
+            echo "| :--- | :--- |"
+            echo "| Repositorio | \`${{ github.repository }}\` |"
+            echo "| Rama / Evento | \`${{ github.ref_name }}\` (\`${{ github.event_name }}\`) |"
+            echo "| Commit | \`${{ steps.meta.outputs.short_sha }}\` |"
+            echo "| Imagen GHCR | \`ghcr.io/${{ steps.meta.outputs.owner_lower }}/${{ steps.meta.outputs.repo_lower }}:develop-${{ steps.meta.outputs.short_sha }}\` |"
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "| Publicacion Registry | Omitida en pull_request (solo build local y auditoria) |"
+            elif [ "${{ steps.dockerhub.outputs.enabled }}" = "true" ]; then
+              echo "| Imagen Docker Hub | \`${{ steps.dockerhub.outputs.user_lower }}/${{ steps.meta.outputs.repo_lower }}:develop-${{ steps.meta.outputs.short_sha }}\` |"
+            else
+              echo "| Imagen Docker Hub | Omitida (secrets DOCKERHUB_USERNAME / DOCKERHUB_TOKEN no configurados) |"
+            fi
+            echo "| Artifacts | Build artifact + \`${{ steps.meta.outputs.repo_lower }}-trivy-report-${{ steps.meta.outputs.short_sha }}\` |"
+            echo ""
+            echo "### Primeros resultados de Trivy (HIGH, CRITICAL - ignorando sin parche)"
+            echo '```text'
+            head -n 60 trivy-report.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
