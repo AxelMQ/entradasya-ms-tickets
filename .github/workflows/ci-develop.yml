@@ -168,7 +168,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Escanear imagen con Trivy (reporte tabla)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -181,7 +181,7 @@ jobs:
           exit-code: '0'
 
       - name: Escanear imagen con Trivy (reporte JSON)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
