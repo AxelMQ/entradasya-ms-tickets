@@ -1,0 +1,23 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Archivos de ejemplo, reportes, compilados y valores fallback de desarrollo"
+paths = [
+  '''\.env\.example$''',
+  '''\.env\..*\.example$''',
+  '''node_modules/''',
+  '''dist/''',
+  '''build/''',
+  '''target/''',
+  '''\.venv/''',
+  '''venv/''',
+  '''artifact-out/''',
+  '''reports/'''
+]
+regexes = [
+  '''change_me_.*''',
+  '''example_.*''',
+  '''super-secure-shared-secret-entradasya-2026.*''',
+  '''internal-service-secret-entradasya-2026'''
+]

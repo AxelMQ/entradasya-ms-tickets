@@ -1,0 +1,13 @@
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+storage/tickets/*.pdf
+!storage/tickets/.gitkeep
+.env
+.env.*
+!.env.example
+tests
+.git
+.gitignore

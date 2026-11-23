@@ -1,0 +1,28 @@
+# Entorno y secretos locales
+.env
+.env.local
+.env.*.local
+
+# Logs y reportes CI locales
+*.log
+logs/
+artifact-out/
+reports/
+trivy-report.*
+
+# Sistema operativo e IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Python / Pytest
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.pytest_cache/
+*.egg-info/
+storage/tickets/*.pdf
+!storage/tickets/.gitkeep
