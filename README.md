@@ -68,3 +68,7 @@ La suite de pruebas utiliza `pytest`, `pytest-asyncio` y base de datos SQLite en
 ```bash
 pytest -v
 ```
+
+## Estado de Verificacion CI/CD
+
+- Pipeline `.github/workflows/ci-develop.yml` verificado con disparo automatico en rama `develop`, generando artifacts descargables e imagenes en GHCR y Docker Hub.
